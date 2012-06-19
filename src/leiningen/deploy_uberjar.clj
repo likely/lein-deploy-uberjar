@@ -2,65 +2,74 @@
   "Build and deploy standalone jar to remote repository.
 
 This code blatantly ripped from lein's standard deploy task."
-  (:require [lancet.core :as lancet])
-  (:use [leiningen.core :only [abort repositories-for]]
-        [leiningen.uberjar :only [uberjar]]
-        [leiningen.pom :only [pom snapshot?]]
-        [leiningen.util.maven :only [make-model make-artifact]]
-        [leiningen.deps :only [make-repository]]
-        [clojure.java.io :only [file]])
-  (:import (org.apache.maven.artifact.ant DeployTask Pom Authentication)
-           (org.apache.tools.ant BuildException)
-           (org.apache.maven.project MavenProject)))
+  (:require [leiningen.core.main :as main]
+            [leiningen.uberjar :as uberjar]
+            [leiningen.pom :as pom]
+            [leiningen.core.classpath :as classpath]
+            [cemerick.pomegranate.aether :as aether]
+            [clojure.java.io :as io]))
 
-(defn- make-maven-project [project]
-  (doto (MavenProject. (make-model project))
-    (.setArtifact (make-artifact (make-model project)))))
+(defn- abort-message [message]
+  (cond (re-find #"Return code is 405" message)
+        (str message "\n" "Ensure you are deploying over SSL.")
+        (re-find #"Return code is 401" message)
+        (str message "\n" "See `lein help deploy` for an explanation of how to"
+             " specify credentials.")
+        :else message))
 
-(defn- get-repository [project repository-name]
-  (let [deploy-repositories (repositories-for project :kind :deploy-repositories)
-        repositories (repositories-for project)
-        repository (or (deploy-repositories repository-name)
-                       (repositories repository-name)
-                       {:url repository-name})]
-    (make-repository [repository-name repository])))
-
-(use '[leiningen.deps :only [make-deps-task]])
+(defn add-auth-interactively [[id settings]]
+  (if (or (and (:username settings) (some settings [:password :passphrase
+                                                    :private-key-file]))
+          (.startsWith (:url settings) "file://"))
+    [id settings]
+    (do
+      (println "No credentials found for" id)
+      (println "See `lein help deploying` for how to configure credentials.")
+      (print "Username: ") (flush)
+      (let [username (read-line)
+            password (.readPassword (System/console) "%s"
+                                    (into-array ["Password: "]))]
+        [id (assoc settings :username username :password password)]))))
 
 (defn deploy-uberjar
-  "Build jar and deploy to remote repository.
+  "Build uberjar and deploy to remote repository.
 
-The target repository will be looked up in :repositories: snapshot
-versions will go to the repo named \"snapshots\" while stable versions
-will go to \"releases\". You can also deploy to another repository
-in :repositories by providing its name as an argument.
+The target repository will be looked up in :repositories in project.clj:
 
-  :repositories {\"java.net\" \"http://download.java.net/maven/2\"
-                 \"snapshots\" {:url \"https://blueant.com/archiva/snapshots\"
-                                :username \"milgrim\" :password \"locative\"}
-                 \"releases\" {:url \"https://blueant.com/archiva/internal\"
-                               :private-key \"etc/id_dsa\"}}
+  :repositories {\"snapshots\" \"https://internal.repo/snapshots\"
+                 \"releases\" \"https://internal.repo/releases\"
+                 \"alternate\" \"https://other.server/repo\"}
 
-You can set authentication options keyed by repository name in
-~/.lein/init.clj to avoid checking sensitive information into source
-control:
-
-  (def leiningen-auth {\"https://blueant.com/archiva/internal\"
-                       {:passphrase \"vorpalbunny\"}})
-"
+If you don't provide a repository name to deploy to, either \"snapshots\" or
+\"releases\" will be used depending on your project's current version. See
+`lein help deploying` under \"Authentication\" for instructions on how to
+configure your credentials so you are not prompted on each deploy."
   ([project repository-name]
-     (try (doto (DeployTask.)
-            (.setProject lancet/ant-project)
-            (.getSupportedProtocols) ;; see note re: exceptions in deps.clj
-            (.setFile (file (uberjar project)))
-            (.addPom (doto (Pom.)
-                       (.setMavenProject (make-maven-project project))
-                       (.setProject lancet/ant-project)
-                       (.setFile (file (pom project)))))
-            (.addRemoteRepository (get-repository project repository-name))
-            (.execute))
-          (catch BuildException _ 1)))
+     (doseq [key [:description :license :url]]
+       (when (or (nil? (project key)) (re-find #"FIXME" (str (project key))))
+         (main/info "WARNING: please set" key "in project.clj.")))
+     (let [jarfile (uberjar/uberjar project)
+           pomfile (pom/pom project)
+           ;; can't use merge here due to bug in ordered maps:
+           ;; https://github.com/flatland/ordered/issues/4
+           repo-opts (or (get (:deploy-repositories project) repository-name)
+                         (get (:repositories project) repository-name))
+           repo (cond (not repo-opts) ["inline" {:url repository-name}]
+                      (string? repo-opts) [repository-name {:url repo-opts}]
+                      :else [repository-name repo-opts])
+           repo (classpath/add-repo-auth repo)
+           repo (add-auth-interactively repo)]
+       (main/debug "Deploying to" repo)
+       (try (aether/deploy :coordinates [(symbol (:group project)
+                                                 (:name project))
+                                         (:version project)]
+                           :jar-file (io/file jarfile)
+                           :pom-file (io/file pomfile)
+                           :transfer-listener :stdout
+                           :repository [repo])
+            (catch org.sonatype.aether.deployment.DeploymentException e
+              (main/abort (abort-message (.getMessage e)))))))
   ([project]
-     (deploy-uberjar project (if (snapshot? project)
-                               "standalone-snapshots"
-                               "standalone-releases"))))
+     (deploy-uberjar project (if (pom/snapshot? project)
+                               "snapshots"
+                               "releases"))))

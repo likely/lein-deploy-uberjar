@@ -1,3 +1,3 @@
-(defproject lein-deploy-uberjar "1.0.0-SNAPSHOT"
-  :description "FIXME: write description"
-  :dependencies [[org.clojure/clojure "1.3.0"]])
+(defproject lein-deploy-uberjar "2.0.0-SNAPSHOT"
+  :description "Deploys uberjar"
+  :eval-in-leiningen true)
