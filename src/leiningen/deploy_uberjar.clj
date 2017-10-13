@@ -22,6 +22,9 @@
 (defn add-auth-interactively [[id settings]]
   (if (or (and (:username settings) (some settings [:password :passphrase
                                                     :private-key-file]))
+          ;; No auth may be set  by wagon plugins (e.g. s3-wagon-private) that
+          ;; require credentials of type not natively supported by Leiningen.
+          (:no-auth settings)
           (.startsWith (:url settings) "file://"))
     [id settings]
     (do
@@ -40,7 +43,8 @@
                          :when (= id name)] settings)]
     (-> [name settings]
         (classpath/add-repo-auth)
-        (add-auth-interactively))))
+        (add-auth-interactively)
+        )))
 
 (defn sign [file]
   (let [exit (binding [*out* (java.io.StringWriter.)]
