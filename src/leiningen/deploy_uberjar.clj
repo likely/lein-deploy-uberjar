@@ -41,7 +41,7 @@
                          :when (= id name)] settings)]
     (-> [name settings]
         (classpath/add-repo-auth)
-        ;; (add-auth-interactively)
+        (add-auth-interactively)
         )))
 
 (defn sign [file]
